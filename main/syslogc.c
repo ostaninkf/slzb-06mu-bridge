@@ -3,6 +3,7 @@
  * Нужна ровно по той причине, по которой мы неделю ловили разрывы: когда мост
  * перезагружается, его собственный лог исчезает. На чужой машине он остаётся. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <sys/socket.h>
@@ -12,21 +13,52 @@
 #include "settings.h"
 #include "syslogc.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+
+#define SYSLOG_LINE 240
+#define QUEUE_LEN  32
+
 static int sock = -1;
 static struct sockaddr_in dst;
 static vprintf_like_t prev_logger;
+static QueueHandle_t q;
+static volatile bool inside;      /* защита от рекурсии */
 
+/* Логгер только складывает строку в очередь. Отправляет отдельная задача:
+ * вызывать сетевые функции прямо отсюда нельзя — lwIP пишет собственные
+ * сообщения, логгер вызывается повторно, и стек кончается за миллисекунды. */
 static int logger(const char *fmt, va_list ap)
 {
-    char line[512];
+    char line[SYSLOG_LINE];
     int n = vsnprintf(line, sizeof(line), fmt, ap);
-    if (sock >= 0 && n > 0) {
-        char msg[600];
-        /* facility local0 (16), severity informational (6) => 134 */
-        int m = snprintf(msg, sizeof(msg), "<134>%s %s", cfg.hostname, line);
-        sendto(sock, msg, m > 0 ? m : 0, 0, (struct sockaddr *)&dst, sizeof(dst));
+    if (q && n > 0 && !inside && !xPortInIsrContext()) {
+        char *copy = malloc(n + 1 > SYSLOG_LINE ? SYSLOG_LINE : n + 1);
+        if (copy) {
+            strncpy(copy, line, SYSLOG_LINE - 1);
+            copy[SYSLOG_LINE - 1] = 0;
+            if (xQueueSend(q, &copy, 0) != pdTRUE) free(copy);
+        }
     }
     return prev_logger ? prev_logger(fmt, ap) : n;
+}
+
+static void sender_task(void *arg)
+{
+    char *line;
+    for (;;) {
+        if (xQueueReceive(q, &line, portMAX_DELAY) != pdTRUE) continue;
+        if (sock >= 0) {
+            char msg[SYSLOG_LINE + 96];
+            /* facility local0 (16), severity informational (6) => 134 */
+            int m = snprintf(msg, sizeof(msg), "<134>%s %s", cfg.hostname, line);
+            inside = true;
+            sendto(sock, msg, m > 0 ? m : 0, 0, (struct sockaddr *)&dst, sizeof(dst));
+            inside = false;
+        }
+        free(line);
+    }
 }
 
 void syslog_start(void)
@@ -41,6 +73,9 @@ void syslog_start(void)
     dst.sin_port = htons(cfg.syslog_port);
     dst.sin_addr.s_addr = inet_addr(cfg.syslog_host);
 
+    q = xQueueCreate(QUEUE_LEN, sizeof(char *));
+    if (!q) { close(sock); sock = -1; return; }
+    xTaskCreate(sender_task, "syslog", 4096, NULL, 2, NULL);
     prev_logger = esp_log_set_vprintf(logger);
     ESP_LOGI("syslog", "журнал уходит на %s:%u", cfg.syslog_host, cfg.syslog_port);
 }

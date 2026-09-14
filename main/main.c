@@ -19,6 +19,7 @@
 #include "mqttpub.h"
 #include "syslogc.h"
 #include "usbmode.h"
+#include "safety.h"
 
 static const char *TAG = "slzb";
 
@@ -83,6 +84,12 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    /* Раньше всего: счётчик аварийных перезагрузок и решение об откате.
+     * Если поставить это после инициализации периферии, падение внутри неё
+     * не попадёт в счётчик — мост уйдёт в бесконечный цикл перезагрузок,
+     * и вернуть его можно будет только по USB. Так и случилось 14.09.2026. */
+    safety_start();
 
     settings_load();
 

@@ -24,6 +24,9 @@ CONFIG_ETH_SPI_ETHERNET_W5500=y
 CONFIG_ETH_USE_ESP32_EMAC=n
 CONFIG_ETH_TRANSMIT_MUTEX=y
 
+# --- откат на прошлый образ: загрузчик помечает новый как испытуемый ---
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # --- сторожевой таймер: паника, а не тихое зависание ---
 CONFIG_ESP_TASK_WDT_INIT=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10

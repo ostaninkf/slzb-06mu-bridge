@@ -16,6 +16,7 @@
 #include "net.h"
 #include "ncpflash.h"
 #include "web.h"
+#include "safety.h"
 
 static const char *TAG = "web";
 
@@ -29,27 +30,32 @@ static const char PAGE[] =
 "label{display:flex;justify-content:space-between;gap:1rem;padding:.3rem 0;align-items:center}"
 "input,select{font:inherit;padding:.25rem .4rem;min-width:12rem}input[type=checkbox]{min-width:auto}"
 "button{font:inherit;padding:.45rem .9rem;margin:.3rem .4rem .3rem 0}"
-"fieldset{border:1px solid #ccc;border-radius:.4rem;margin:0 0 1rem}"
 "#msg{position:sticky;top:0;background:#ffd;padding:.4rem;display:none}"
+"#lang{float:right;min-width:auto}"
 "@media(prefers-color-scheme:dark){body{background:#111;color:#eee}td{border-color:#333}"
-"fieldset{border-color:#444}input,select,button{background:#222;color:#eee;border:1px solid #444}"
-"#msg{background:#332}}</style>"
-"<div id=msg></div><h1>SLZB-06MU — мост Zigbee</h1>"
-"<h2>Состояние</h2><table id=st></table>"
-"<h2>Настройки</h2><form id=f></form>"
-"<button onclick=\"save()\">Сохранить и перезагрузить</button>"
-"<button onclick=\"post('/ncp/reset')\">Сбросить радио</button>"
-"<button onclick=\"post('/reboot')\">Перезагрузить мост</button>"
-"<h2>Обновление</h2>"
-"<p>Прошивка моста: <input type=file id=fw accept=.bin> <button onclick=\"up('/update','fw')\">Залить</button>"
-"<br>Прошивка радио (.gbl): <input type=file id=gbl accept=.gbl> <button onclick=\"up('/ncp/update','gbl')\">Залить</button></p>"
+"input,select,button{background:#222;color:#eee;border:1px solid #444}#msg{background:#332}}</style>"
+"<select id=lang onchange=\"setLang(this.value)\"><option value=ru>Русский</option>"
+"<option value=en>English</option></select>"
+"<div id=msg></div><h1>SLZB-06MU</h1>"
+"<h2 id=h_state></h2><table id=st></table>"
+"<h2 id=h_cfg></h2><form id=f></form>"
+"<button id=b_save onclick=\"save()\"></button>"
+"<button id=b_ncp onclick=\"post('/ncp/reset')\"></button>"
+"<button id=b_reboot onclick=\"post('/reboot')\"></button>"
+"<h2 id=h_upd></h2>"
+"<p><span id=l_fw></span> <input type=file id=fw accept=.bin> <button id=b_fw onclick=\"up('/update','fw')\"></button>"
+"<br><span id=l_gbl></span> <input type=file id=gbl accept=.gbl> <button id=b_gbl onclick=\"up('/ncp/update','gbl')\"></button></p>"
 "<script>"
-"const SN={uptime:'аптайм, с',ip:'адрес',link:'канал',clients:'клиентов на радио',"
-"ncp_to_net:'байт от радио',net_to_ncp:'байт к радио',ring_used:'в буфере',"
-"ring_full:'переполнений буфера',connects:'подключений',disconnects:'обрывов',"
-"dropped_no_client:'отброшено без клиента',ncp_resets:'сбросов радио',temp:'температура, °C',"
-"heap:'свободная память',min_heap:'минимум памяти',version:'версия'};"
-"const FN={hostname:'Имя в сети',eth_dhcp:'Ethernet: DHCP',eth_ip:'IP',eth_mask:'Маска',eth_gw:'Шлюз',"
+"const L={ru:{state:'Состояние',cfg:'Настройки',upd:'Обновление',save:'Сохранить и перезагрузить',"
+"ncp:'Сбросить радио',reboot:'Перезагрузить мост',fw:'Прошивка моста:',gbl:'Прошивка радио (.gbl):',"
+"send:'Залить',saved:'сохранено, перезагружаюсь',failed:'не сохранилось: ',sent:'команда отправлена',"
+"nofile:'файл не выбран',sending:'заливаю ',bytes:' байт…',"
+"uptime:'аптайм, с',ip:'адрес',link:'канал',clients:'клиентов на радио',ncp_to_net:'байт от радио',"
+"net_to_ncp:'байт к радио',ring_used:'в буфере',ring_full:'переполнений буфера',connects:'подключений',"
+"disconnects:'обрывов',dropped_no_client:'отброшено без клиента',ncp_resets:'сбросов радио',"
+"temp:'температура, °C',heap:'свободная память',min_heap:'минимум памяти',version:'версия',"
+"image:'образ',crashes:'аварий подряд',"
+"hostname:'Имя в сети',eth_dhcp:'Ethernet: DHCP',eth_ip:'IP',eth_mask:'Маска',eth_gw:'Шлюз',"
 "dns1:'DNS 1',dns2:'DNS 2',mac_override:'Задать MAC вручную',mac:'MAC',"
 "wifi_enabled:'Wi-Fi как резерв',wifi_ssid:'Wi-Fi сеть',wifi_pass:'Wi-Fi пароль',"
 "ap_fallback:'Точка доступа, если сети нет',ncp_baud:'Скорость UART радио',flow:'Управление потоком',"
@@ -57,35 +63,74 @@ static const char PAGE[] =
 "night_mode:'Ночной режим',night_from:'Гасить с (час)',night_to:'Гасить до (часа)',"
 "mqtt_enabled:'MQTT',mqtt_host:'MQTT сервер',mqtt_port:'MQTT порт',mqtt_user:'MQTT логин',"
 "mqtt_pass:'MQTT пароль',mqtt_base:'MQTT базовый топик',syslog_enabled:'Syslog',"
-"syslog_host:'Syslog сервер',syslog_port:'Syslog порт',ntp_server:'NTP сервер',timezone:'Часовой пояс'};"
-"const SEL={flow:{0:'выключено',1:'RTS (рекомендуется)',2:'RTS+CTS'},"
-"ncp_route:{0:'в сеть по TCP',1:'в USB'}};"
+"syslog_host:'Syslog сервер',syslog_port:'Syslog порт',ntp_server:'NTP сервер',timezone:'Часовой пояс',"
+"f0:'выключено',f1:'RTS (рекомендуется)',f2:'RTS+CTS',r0:'в сеть по TCP',r1:'в USB',"
+"set:'задан',unset:'пусто'},"
+"en:{state:'Status',cfg:'Settings',upd:'Update',save:'Save and reboot',"
+"ncp:'Reset radio',reboot:'Reboot bridge',fw:'Bridge firmware:',gbl:'Radio firmware (.gbl):',"
+"send:'Upload',saved:'saved, rebooting',failed:'not saved: ',sent:'command sent',"
+"nofile:'no file selected',sending:'uploading ',bytes:' bytes…',"
+"uptime:'uptime, s',ip:'address',link:'uplink',clients:'clients on radio',ncp_to_net:'bytes from radio',"
+"net_to_ncp:'bytes to radio',ring_used:'in buffer',ring_full:'buffer overflows',connects:'connections',"
+"disconnects:'disconnects',dropped_no_client:'dropped, no client',ncp_resets:'radio resets',"
+"temp:'chip temperature, °C',heap:'free heap',min_heap:'minimum heap',version:'version',"
+"image:'image',crashes:'crashes in a row',"
+"hostname:'Hostname',eth_dhcp:'Ethernet: DHCP',eth_ip:'IP',eth_mask:'Netmask',eth_gw:'Gateway',"
+"dns1:'DNS 1',dns2:'DNS 2',mac_override:'Set MAC manually',mac:'MAC',"
+"wifi_enabled:'Wi-Fi as fallback',wifi_ssid:'Wi-Fi network',wifi_pass:'Wi-Fi password',"
+"ap_fallback:'Access point when no network',ncp_baud:'Radio UART baud rate',flow:'Flow control',"
+"tcp_port:'Radio TCP port',ncp_route:'Where to route the radio',leds_enabled:'LEDs',"
+"night_mode:'Night mode',night_from:'Dim from (hour)',night_to:'Dim until (hour)',"
+"mqtt_enabled:'MQTT',mqtt_host:'MQTT host',mqtt_port:'MQTT port',mqtt_user:'MQTT user',"
+"mqtt_pass:'MQTT password',mqtt_base:'MQTT base topic',syslog_enabled:'Syslog',"
+"syslog_host:'Syslog host',syslog_port:'Syslog port',ntp_server:'NTP server',timezone:'Time zone',"
+"f0:'off',f1:'RTS (recommended)',f2:'RTS+CTS',r0:'to network over TCP',r1:'to USB',"
+"set:'set',unset:'empty'}};"
+"const FIELDS=['hostname','eth_dhcp','eth_ip','eth_mask','eth_gw','dns1','dns2','mac_override','mac',"
+"'wifi_enabled','wifi_ssid','wifi_pass','ap_fallback','ncp_baud','flow','tcp_port','ncp_route',"
+"'leds_enabled','night_mode','night_from','night_to','mqtt_enabled','mqtt_host','mqtt_port',"
+"'mqtt_user','mqtt_pass','mqtt_base','syslog_enabled','syslog_host','syslog_port','ntp_server','timezone'];"
+"const SEL={flow:['f0','f1','f2'],ncp_route:['r0','r1']};"
+"let lang=localStorage.getItem('lang')||(navigator.language.startsWith('ru')?'ru':'en');"
 "let cur={};"
-"function note(t){const m=document.getElementById('msg');m.textContent=t;m.style.display='block';"
+"function t(k){return L[lang][k]||k}"
+"function setLang(v){lang=v;localStorage.setItem('lang',v);paint();load()}"
+"function paint(){document.getElementById('lang').value=lang;"
+"document.getElementById('h_state').textContent=t('state');"
+"document.getElementById('h_cfg').textContent=t('cfg');"
+"document.getElementById('h_upd').textContent=t('upd');"
+"document.getElementById('b_save').textContent=t('save');"
+"document.getElementById('b_ncp').textContent=t('ncp');"
+"document.getElementById('b_reboot').textContent=t('reboot');"
+"document.getElementById('l_fw').textContent=t('fw');"
+"document.getElementById('l_gbl').textContent=t('gbl');"
+"document.getElementById('b_fw').textContent=t('send');"
+"document.getElementById('b_gbl').textContent=t('send')}"
+"function note(x){const m=document.getElementById('msg');m.textContent=x;m.style.display='block';"
 "setTimeout(()=>m.style.display='none',6000)}"
 "async function st(){const r=await(await fetch('/status')).json();"
 "document.getElementById('st').innerHTML=Object.entries(r).map(([k,v])=>"
-"`<tr><td>${SN[k]||k}</td><td>${v}</td></tr>`).join('')}"
+"`<tr><td>${t(k)}</td><td>${v}</td></tr>`).join('')}"
 "async function load(){cur=await(await fetch('/settings')).json();"
-"document.getElementById('f').innerHTML=Object.entries(FN).map(([k,n])=>{"
-"if(k.endsWith('_pass'))return `<label>${n}<input id=i_${k} type=password placeholder='${cur[k+'_set']?'задан':'пусто'}'></label>`;"
-"if(SEL[k])return `<label>${n}<select id=i_${k}>`+Object.entries(SEL[k]).map(([v,t])=>"
-"`<option value=${v} ${cur[k]==v?'selected':''}>${t}</option>`).join('')+'</select></label>';"
-"if(typeof cur[k]==='boolean')return `<label>${n}<input id=i_${k} type=checkbox ${cur[k]?'checked':''}></label>`;"
-"if(typeof cur[k]==='number')return `<label>${n}<input id=i_${k} type=number value='${cur[k]}'></label>`;"
-"return `<label>${n}<input id=i_${k} value='${(cur[k]!==undefined?cur[k]:'')}'></label>`}).join('')}"
-"async function save(){const o={};for(const k of Object.keys(FN)){const e=document.getElementById('i_'+k);"
+"document.getElementById('f').innerHTML=FIELDS.map(k=>{"
+"if(k.endsWith('_pass'))return `<label>${t(k)}<input id=i_${k} type=password placeholder='${cur[k+'_set']?t('set'):t('unset')}'></label>`;"
+"if(SEL[k])return `<label>${t(k)}<select id=i_${k}>`+SEL[k].map((c,i)=>"
+"`<option value=${i} ${cur[k]==i?'selected':''}>${t(c)}</option>`).join('')+'</select></label>';"
+"if(typeof cur[k]==='boolean')return `<label>${t(k)}<input id=i_${k} type=checkbox ${cur[k]?'checked':''}></label>`;"
+"if(typeof cur[k]==='number')return `<label>${t(k)}<input id=i_${k} type=number value='${cur[k]}'></label>`;"
+"return `<label>${t(k)}<input id=i_${k} value='${(cur[k]!==undefined?cur[k]:'')}'></label>`}).join('')}"
+"async function save(){const o={};for(const k of FIELDS){const e=document.getElementById('i_'+k);"
 "if(!e)continue;if(e.type==='checkbox')o[k]=e.checked;"
 "else if(e.type==='password'){if(e.value)o[k]=e.value}"
 "else if(e.type==='number'||SEL[k])o[k]=Number(e.value);else o[k]=e.value}"
 "const r=await fetch('/settings',{method:'POST',body:JSON.stringify(o)});"
-"note(r.ok?'сохранено, перезагружаюсь':'не сохранилось: '+await r.text());"
+"note(r.ok?t('saved'):t('failed')+await r.text());"
 "if(r.ok)setTimeout(()=>location.reload(),9000)}"
-"async function post(u){await fetch(u,{method:'POST'});note('команда отправлена')}"
-"async function up(url,id){const f=document.getElementById(id).files[0];if(!f)return note('файл не выбран');"
-"note('заливаю '+f.name+', '+f.size+' байт…');"
+"async function post(u){await fetch(u,{method:'POST'});note(t('sent'))}"
+"async function up(url,id){const f=document.getElementById(id).files[0];if(!f)return note(t('nofile'));"
+"note(t('sending')+f.name+', '+f.size+t('bytes'));"
 "const r=await fetch(url,{method:'POST',body:f});note(await r.text())}"
-"st();load();setInterval(st,2000);</script>";
+"paint();st();load();setInterval(st,2000);</script>";
 
 static esp_err_t h_root(httpd_req_t *r)
 {
@@ -103,7 +148,8 @@ static esp_err_t h_status(httpd_req_t *r)
         "{\"uptime\":%llu,\"ip\":\"%s\",\"link\":\"%s\",\"clients\":%d,"
         "\"ncp_to_net\":%llu,\"net_to_ncp\":%llu,\"ring_used\":%u,\"ring_full\":%u,"
         "\"connects\":%u,\"disconnects\":%u,\"dropped_no_client\":%llu,\"ncp_resets\":%u,"
-        "\"temp\":%.1f,\"heap\":%u,\"min_heap\":%u,\"version\":\"%s %s\"}",
+        "\"temp\":%.1f,\"heap\":%u,\"min_heap\":%u,\"version\":\"%s %s\","
+        "\"image\":\"%s\",\"crashes\":%u}",
         (unsigned long long)(esp_timer_get_time() / 1000000), net_ip(),
         net_eth_link() ? "витая пара" : net_wifi_link() ? "Wi-Fi" : net_ap_up() ? "точка доступа" : "нет",
         s.connects > s.disconnects ? 1 : 0,
@@ -112,7 +158,9 @@ static esp_err_t h_status(httpd_req_t *r)
         (unsigned)s.disconnects, (unsigned long long)s.dropped_no_client,
         (unsigned)s.ncp_resets, bridge_chip_temp(),
         (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
-        d->version, d->date);
+        d->version, d->date,
+        safety_on_trial() ? "на испытательном сроке" : "признан рабочим",
+        safety_crashes());
     httpd_resp_set_type(r, "application/json");
     return httpd_resp_send(r, buf, n);
 }
@@ -212,8 +260,9 @@ void web_start(void)
     c.lru_purge_enable = true;
     c.stack_size = 8192;
     c.max_uri_handlers = 10;
-    c.recv_wait_timeout = 20;
-    c.send_wait_timeout = 20;
+    c.recv_wait_timeout = 5;
+    c.send_wait_timeout = 5;
+    c.max_open_sockets = 7;
 
     httpd_handle_t srv = NULL;
     if (httpd_start(&srv, &c) != ESP_OK) { ESP_LOGE(TAG, "веб-сервер не поднялся"); return; }
