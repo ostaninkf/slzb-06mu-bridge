@@ -33,6 +33,39 @@ in hardware all along and was never applied.
 Everything a bridge does not need — BLE, Wi-Fi, MQTT, add-ons, a megabyte and a
 half of web UI — is not built at all: the image is 462 KB against 4 MB.
 
+
+## Features
+
+Everything is configured through the web UI and kept in NVS — not a single
+address, password or port is baked into the firmware.
+
+- **Radio-to-network bridge**: TCP port, UART baud rate and flow control
+  (off / RTS / RTS+CTS) are all changeable without a rebuild.
+- **USB mode**: the radio is handed to USB-CDC instead of the network, so the
+  bridge can be plugged straight into a machine running Z2M. The console is
+  taken over by data in that mode, so the log only survives via syslog.
+- **Networking**: DHCP or a static address, hostname, DNS, custom MAC if needed.
+  Wi-Fi comes up **only as a fallback** when the Ethernet link drops; with no
+  network at all, an access point appears after a minute so the bridge can be
+  configured without opening the case. mDNS and time sync included.
+- **Flashing the radio through the bridge**: a `.gbl` file is uploaded from the
+  browser into the Gecko Bootloader over XMODEM. The bridge never reaches out to
+  the internet for it, unlike the stock firmware which pulled images from the
+  vendor's server.
+- **Updating the bridge itself** over the network, into the spare OTA slot.
+- **MQTT**: the firmware publishes its own state with HA discovery — uptime,
+  client presence, disconnects, buffer overflows, bytes both ways, chip
+  temperature. No external collector needed.
+- **Syslog** over UDP, so the log outlives a reboot on someone else's machine.
+- **LEDs** can be switched off entirely or only at night, on a schedule.
+- **Button**: short press resets the radio, 5 seconds reboots the bridge,
+  15 seconds restores factory settings.
+
+Deliberately not carried over from the stock firmware: hardware this board does
+not have (second radio and CC1101, 4G, Z-Wave, Thread/OTBR), anything that takes
+the bridge out to the internet (vendor auto-updates, VPN), and features of the
+larger models in the series — BLE proxy, buzzer melodies, Ambilight.
+
 ## Hardware
 
 Pinout lives in `main/board.h`. It was read off a running bridge over JTAG (GPIO
@@ -76,9 +109,10 @@ Running on a live bridge since 2026-09-14: Ethernet comes up, Z2M talks to the
 NCP, and OTA over the network is confirmed (the bridge rebooted itself into the
 `ota_1` slot, verified through otadata).
 
-Not done: CTS (enable only after confirming the NCP was built with hardware flow
-control — otherwise transmission stalls for good), flashing the NCP through the
-bridge, syslog.
+CTS is off by default: enable it only after confirming the radio was built with
+hardware flow control, otherwise transmission stalls for good. The feature set
+above compiles but the live bridge still runs the previous build — it will be
+flashed once verified.
 
 ## License
 

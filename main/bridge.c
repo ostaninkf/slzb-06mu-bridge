@@ -26,7 +26,9 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "board.h"
+#include "settings.h"
 #include "bridge.h"
+#include "driver/temperature_sensor.h"
 
 static const char *TAG = "bridge";
 
@@ -43,6 +45,17 @@ static int listen_fd = -1;
 static int client_fd = -1;
 
 static bridge_stats_t st;
+static volatile bool paused;              /* на время прошивки радиомодуля */
+static temperature_sensor_handle_t tsens;
+
+void bridge_pause(bool on) { paused = on; }
+
+float bridge_chip_temp(void)
+{
+    float t = 0;
+    if (tsens) temperature_sensor_get_celsius(tsens, &t);
+    return t;
+}
 
 static inline size_t ring_used(void) { return (r_head - r_tail) % RING_SZ; }
 static inline size_t ring_free(void) { return RING_SZ - 1 - ring_used(); }
@@ -67,26 +80,33 @@ static void close_client(const char *why)
 
 static void ncp_uart_init(void)
 {
-    const uart_config_t cfg = {
-        .baud_rate  = NCP_BAUD,
+    const uart_config_t uc = {
+        .baud_rate  = (int)cfg.ncp_baud,
         .data_bits  = UART_DATA_8_BITS,
         .parity     = UART_PARITY_DISABLE,
         .stop_bits  = UART_STOP_BITS_1,
-        /* Только RTS: мы тормозим NCP, но сами передаём всегда.
-         * CTS намеренно не включён — если NCP не управляет этой линией,
-         * включённый CTS намертво заблокировал бы передачу. Включать
-         * UART_HW_FLOWCTRL_CTS_RTS только после проверки на живом NCP. */
-        .flow_ctrl  = UART_HW_FLOWCTRL_RTS,
+        /* По умолчанию только RTS: мы тормозим NCP, но сами передаём всегда.
+         * CTS включается настройкой и лишь после проверки на живом радио —
+         * если оно не управляет этой линией, включённый CTS заблокирует
+         * передачу намертво. */
+        .flow_ctrl  = cfg.flow == FLOW_RTS_CTS ? UART_HW_FLOWCTRL_CTS_RTS
+                    : cfg.flow == FLOW_RTS     ? UART_HW_FLOWCTRL_RTS
+                                               : UART_HW_FLOWCTRL_DISABLE,
         .rx_flow_ctrl_thresh = 100,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    ESP_ERROR_CHECK(uart_param_config(NCP_UART_NUM, &cfg));
+    ESP_ERROR_CHECK(uart_param_config(NCP_UART_NUM, &uc));
     ESP_ERROR_CHECK(uart_set_pin(NCP_UART_NUM, PIN_NCP_TX, PIN_NCP_RX,
                                  PIN_NCP_RTS, PIN_NCP_CTS));
     ESP_ERROR_CHECK(uart_driver_install(NCP_UART_NUM, UART_RX_BUF, UART_TX_BUF,
                                         0, NULL, 0));
-    ESP_LOGI(TAG, "UART2 %d бод, tx=%d rx=%d rts=%d (аппаратный RTS включён)",
-             NCP_BAUD, PIN_NCP_TX, PIN_NCP_RX, PIN_NCP_RTS);
+    static const char *fl[] = { "выключено", "RTS", "RTS+CTS" };
+    ESP_LOGI(TAG, "UART2 %lu бод, tx=%d rx=%d rts=%d cts=%d, управление потоком: %s",
+             (unsigned long)cfg.ncp_baud, PIN_NCP_TX, PIN_NCP_RX, PIN_NCP_RTS,
+             PIN_NCP_CTS, fl[cfg.flow <= 2 ? cfg.flow : 0]);
+
+    temperature_sensor_config_t tc = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    if (temperature_sensor_install(&tc, &tsens) == ESP_OK) temperature_sensor_enable(tsens);
 }
 
 void ncp_reset(void)
@@ -104,12 +124,12 @@ static int listen_open(void)
     if (fd < 0) return -1;
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(NCP_TCP_PORT),
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(cfg.tcp_port),
                              .sin_addr.s_addr = htonl(INADDR_ANY) };
     if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(fd, 2) < 0) {
         close(fd); return -1;
     }
-    ESP_LOGI(TAG, "слушаю TCP :%d", NCP_TCP_PORT);
+    ESP_LOGI(TAG, "слушаю TCP :%u", cfg.tcp_port);
     return fd;
 }
 
@@ -195,6 +215,14 @@ static void bridge_task(void *arg)
     for (;;) {
         esp_task_wdt_reset();
 
+        /* Пока радио прошивается, UART занят целиком: сидим тихо, но
+         * продолжаем кормить сторожевой таймер. */
+        if (paused) {
+            if (client_fd >= 0) close_client("прошивка радиомодуля");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         struct pollfd p[2];
         int np = 0;
         p[np].fd = listen_fd; p[np].events = POLLIN; np++;
@@ -226,6 +254,19 @@ static void bridge_task(void *arg)
 
 void bridge_start(void)
 {
+    if (cfg.ncp_route == NCP_TO_USB) {
+        /* радио уходит в USB — сетевой мост не поднимаем */
+        gpio_config_t io2 = {
+            .pin_bit_mask = (1ULL << PIN_NCP_RST) | (1ULL << PIN_NCP_BOOT),
+            .mode = GPIO_MODE_OUTPUT,
+        };
+        ESP_ERROR_CHECK(gpio_config(&io2));
+        gpio_set_level(PIN_NCP_BOOT, 1);
+        gpio_set_level(PIN_NCP_RST, 1);
+        ncp_uart_init();
+        return;
+    }
+
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << PIN_NCP_RST) | (1ULL << PIN_NCP_BOOT),
         .mode = GPIO_MODE_OUTPUT,

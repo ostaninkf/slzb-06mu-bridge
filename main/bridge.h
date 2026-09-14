@@ -17,3 +17,5 @@ typedef struct {
 void bridge_start(void);
 void bridge_get_stats(bridge_stats_t *out);
 void ncp_reset(void);
+void bridge_pause(bool on);      /* приостановить мост: UART нужен целиком */
+float bridge_chip_temp(void);
