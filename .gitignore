@@ -1,0 +1,7 @@
+build/
+sdkconfig
+sdkconfig.old
+backup/
+managed_components/
+dependencies.lock
+local_config.h
