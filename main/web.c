@@ -262,7 +262,7 @@ void web_start(void)
     c.max_uri_handlers = 10;
     c.recv_wait_timeout = 5;
     c.send_wait_timeout = 5;
-    c.max_open_sockets = 7;
+    c.max_open_sockets = 5;
 
     httpd_handle_t srv = NULL;
     if (httpd_start(&srv, &c) != ESP_OK) { ESP_LOGE(TAG, "веб-сервер не поднялся"); return; }

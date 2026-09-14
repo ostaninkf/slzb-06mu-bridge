@@ -34,10 +34,15 @@ static int logger(const char *fmt, va_list ap)
     char line[SYSLOG_LINE];
     int n = vsnprintf(line, sizeof(line), fmt, ap);
     if (q && n > 0 && !inside && !xPortInIsrContext()) {
-        char *copy = malloc(n + 1 > SYSLOG_LINE ? SYSLOG_LINE : n + 1);
+        /* Размер блока и объём копирования должны совпадать. Раньше здесь
+         * выделялось n+1 байт, а писалось до SYSLOG_LINE — запись уходила за
+         * границу блока и рушила кучу: мост падал с assert в аллокаторе. */
+        size_t sz = (size_t)n + 1;
+        if (sz > SYSLOG_LINE) sz = SYSLOG_LINE;
+        char *copy = malloc(sz);
         if (copy) {
-            strncpy(copy, line, SYSLOG_LINE - 1);
-            copy[SYSLOG_LINE - 1] = 0;
+            memcpy(copy, line, sz - 1);
+            copy[sz - 1] = 0;
             if (xQueueSend(q, &copy, 0) != pdTRUE) free(copy);
         }
     }
