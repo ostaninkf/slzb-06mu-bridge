@@ -82,7 +82,7 @@ static void mqtt_task(void *arg)
         bridge_stats_t s;
         bridge_get_stats(&s);
         snprintf(v, sizeof(v), "%llu", (unsigned long long)(esp_timer_get_time() / 1000000)); pub("uptime", v, 0);
-        snprintf(v, sizeof(v), "%d", s.connects > s.disconnects ? 1 : 0);                     pub("clients", v, 0);
+        snprintf(v, sizeof(v), "%d", s.client);                                                     pub("clients", v, 0);
         snprintf(v, sizeof(v), "%u", (unsigned)s.disconnects);                                pub("disconnects", v, 0);
         snprintf(v, sizeof(v), "%u", (unsigned)s.ring_full);                                  pub("ring_full", v, 0);
         snprintf(v, sizeof(v), "%llu", (unsigned long long)s.ncp_to_net);                     pub("ncp_to_net", v, 0);

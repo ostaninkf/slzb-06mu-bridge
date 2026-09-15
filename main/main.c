@@ -66,7 +66,7 @@ static void stats_task(void *arg)
                  "канал=%s %s | клиент=%s | радио->сеть %llu (+%llu) | сеть->радио %llu (+%llu) | "
                  "кольцо %u, переполнений %u | коннектов %u, обрывов %u | %.1f °C | куча %u",
                  net_eth_link() ? "витая пара" : net_wifi_link() ? "Wi-Fi" : "нет", net_ip(),
-                 s.connects > s.disconnects ? "есть" : "нет",
+                 s.client ? "есть" : "нет",
                  (unsigned long long)s.ncp_to_net, (unsigned long long)(s.ncp_to_net - prev.ncp_to_net),
                  (unsigned long long)s.net_to_ncp, (unsigned long long)(s.net_to_ncp - prev.net_to_ncp),
                  (unsigned)s.ring_used, (unsigned)s.ring_full,
@@ -78,6 +78,13 @@ static void stats_task(void *arg)
 
 void app_main(void)
 {
+    /* Перехват журнала — раньше всего остального. Пока syslog_start() стоял
+     * после net_start(), всё, что печаталось при старте, уходило только в
+     * консоль, которой на PoE-мосту никто не смотрит: так полтора суток
+     * пряталась ошибка драйвера GPIO про необработанное прерывание W5500.
+     * Строки ждут в очереди и уходят, как только появится адрес. */
+    syslog_capture_start();
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

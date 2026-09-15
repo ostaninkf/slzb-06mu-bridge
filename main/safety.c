@@ -104,7 +104,9 @@ static void safety_task(void *arg)
         bridge_get_stats(&s);
         bool link = net_eth_link() || net_wifi_link();
         bool addr = net_ip()[0] >= '0' && net_ip()[0] <= '9';
-        bool radio = s.ncp_to_net > 0 || s.dropped_no_client > 0;
+        /* ncp_to_net теперь считает всё, что отдал NCP, в том числе кадры,
+         * отброшенные без клиента, — отдельная проверка больше не нужна. */
+        bool radio = s.ncp_to_net > 0;
 
         if (link && addr && radio) { safety_confirm("канал, адрес и радио в порядке"); break; }
     }

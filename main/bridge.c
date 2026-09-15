@@ -45,6 +45,13 @@ static int listen_fd = -1;
 static int client_fd = -1;
 
 static bridge_stats_t st;
+/* Счётчики пишет задача моста, а читают ещё пять задач (stats, leds, web, mqtt,
+ * safety) — и ncp_reset() зовут из веба и кнопки. Без замка 64-битный счётчик
+ * читается половинами и в HA прилетает мусорное значение. */
+static portMUX_TYPE stats_mux = portMUX_INITIALIZER_UNLOCKED;
+#define STATS_LOCK()   portENTER_CRITICAL(&stats_mux)
+#define STATS_UNLOCK() portEXIT_CRITICAL(&stats_mux)
+
 static volatile bool paused;              /* на время прошивки радиомодуля */
 static temperature_sensor_handle_t tsens;
 
@@ -60,7 +67,13 @@ float bridge_chip_temp(void)
 static inline size_t ring_used(void) { return (r_head - r_tail) % RING_SZ; }
 static inline size_t ring_free(void) { return RING_SZ - 1 - ring_used(); }
 
-void bridge_get_stats(bridge_stats_t *out) { *out = st; out->ring_used = ring_used(); }
+void bridge_get_stats(bridge_stats_t *out)
+{
+    STATS_LOCK();
+    *out = st;
+    out->ring_used = ring_used();
+    STATS_UNLOCK();
+}
 
 static void ring_put(const uint8_t *p, size_t n)
 {
@@ -74,7 +87,7 @@ static void close_client(const char *why)
              (unsigned long long)st.net_to_ncp, (unsigned long long)st.ncp_to_net);
     close(client_fd);
     client_fd = -1;
-    st.disconnects++;
+    STATS_LOCK(); st.disconnects++; st.client = 0; STATS_UNLOCK();
     r_tail = r_head;               /* остатки прошлой сессии в сеть не тащим */
 }
 
@@ -114,7 +127,7 @@ void ncp_reset(void)
     gpio_set_level(PIN_NCP_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(20));
     gpio_set_level(PIN_NCP_RST, 1);
-    st.ncp_resets++;
+    STATS_LOCK(); st.ncp_resets++; STATS_UNLOCK();
     ESP_LOGW(TAG, "NCP сброшен по линии RST");
 }
 
@@ -133,11 +146,12 @@ static int listen_open(void)
     return fd;
 }
 
-static void accept_new(void)
+/* true — клиент принят, дескриптор сменился. */
+static bool accept_new(void)
 {
     struct sockaddr_in peer; socklen_t sl = sizeof(peer);
     int fd = accept(listen_fd, (struct sockaddr *)&peer, &sl);
-    if (fd < 0) return;
+    if (fd < 0) return false;
 
     int on = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
@@ -155,26 +169,46 @@ static void accept_new(void)
     if (client_fd >= 0) close_client("вытеснен новым соединением");
 
     client_fd = fd;
-    st.connects++;
+    STATS_LOCK(); st.connects++; st.client = 1; STATS_UNLOCK();
     r_tail = r_head;               /* новая сессия начинается с чистого потока */
     uart_flush_input(NCP_UART_NUM);
     char ip[16];
     inet_ntoa_r(peer.sin_addr, ip, sizeof(ip));
     ESP_LOGI(TAG, "клиент %s подключился", ip);
+    return true;
 }
 
 static void pump_uart_to_ring(void)
 {
+    static bool was_full;              /* переполнение считаем событием, а не опросом */
     uint8_t buf[CHUNK];
+    uint64_t got = 0, dropped = 0;
+    uint32_t full = 0;
+
     for (;;) {
         size_t avail = ring_free();
-        if (avail == 0) { st.ring_full++; return; }     /* RTS сам придержит NCP */
+        if (avail == 0) {                               /* RTS сам придержит NCP */
+            if (!was_full) { full++; was_full = true; }
+            break;
+        }
+        was_full = false;
         size_t want = avail < sizeof(buf) ? avail : sizeof(buf);
         int n = uart_read_bytes(NCP_UART_NUM, buf, want, 0);   /* без ожидания */
-        if (n <= 0) return;
-        if (client_fd < 0) { st.dropped_no_client += n; continue; }  /* дренируем */
+        if (n <= 0) break;
+        /* Считаем всё, что отдал NCP: раньше счётчик рос только при живом
+         * клиенте, и «байт от радио» было занижено ровно на dropped_no_client —
+         * то есть метрика врала как раз в интересный момент, без клиента. */
+        got += n;
+        if (client_fd < 0) { dropped += n; continue; }  /* дренируем */
         ring_put(buf, n);
-        st.ncp_to_net += n;
+    }
+
+    if (got || full) {
+        STATS_LOCK();
+        st.ncp_to_net += got;
+        st.dropped_no_client += dropped;
+        st.ring_full += full;
+        STATS_UNLOCK();
     }
 }
 
@@ -201,10 +235,16 @@ static void pump_net_to_uart(void)
         close_client("ошибка чтения сокета");
         return;
     }
-    /* uart_write_bytes копирует в буфер драйвера; при переполнении ждёт,
-     * поэтому буфер TX взят с запасом, а порции ограничены CHUNK. */
-    uart_write_bytes(NCP_UART_NUM, buf, n);
-    st.net_to_ncp += n;
+    /* uart_write_bytes копирует в буфер драйвера и ждёт, если места нет: при
+     * 115200 бод порция в CHUNK байт — это до 180 мс, и всё это время UART
+     * радио не вычитывается. Короткая запись означает потерянный кусок команды
+     * Z2M, такое надо видеть, а не молча проглатывать. */
+    int w = uart_write_bytes(NCP_UART_NUM, buf, n);
+    if (w != n) {
+        ESP_LOGE(TAG, "в UART радио ушло %d байт из %d", w, n);
+        STATS_LOCK(); st.uart_tx_fail++; STATS_UNLOCK();
+    }
+    if (w > 0) { STATS_LOCK(); st.net_to_ncp += w; STATS_UNLOCK(); }
 }
 
 static void bridge_task(void *arg)
@@ -243,7 +283,10 @@ static void bridge_task(void *arg)
         pump_uart_to_ring();
 
         if (rc > 0) {
-            if (p[0].revents & POLLIN) accept_new();
+            /* Приняли нового — p[1].revents относится к прежнему сокету, а
+             * client_fd уже другой. Дочитывать по чужим флагам нельзя, обмен
+             * начнётся со следующего оборота, через пять миллисекунд. */
+            if ((p[0].revents & POLLIN) && accept_new()) continue;
             if (np == 2 && client_fd >= 0) {
                 if (p[1].revents & (POLLERR | POLLHUP)) {
                     /* Точную причину знает только сокет: POLLERR сам по себе

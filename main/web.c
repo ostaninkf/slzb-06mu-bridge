@@ -53,6 +53,7 @@ static const char PAGE[] =
 "uptime:'аптайм, с',ip:'адрес',link:'канал',clients:'клиентов на радио',ncp_to_net:'байт от радио',"
 "net_to_ncp:'байт к радио',ring_used:'в буфере',ring_full:'переполнений буфера',connects:'подключений',"
 "disconnects:'обрывов',dropped_no_client:'отброшено без клиента',ncp_resets:'сбросов радио',"
+"uart_tx_fail:'не ушло в радио',"
 "temp:'температура, °C',heap:'свободная память',min_heap:'минимум памяти',version:'версия',"
 "image:'образ',crashes:'аварий подряд',"
 "hostname:'Имя в сети',eth_dhcp:'Ethernet: DHCP',eth_ip:'IP',eth_mask:'Маска',eth_gw:'Шлюз',"
@@ -73,6 +74,7 @@ static const char PAGE[] =
 "uptime:'uptime, s',ip:'address',link:'uplink',clients:'clients on radio',ncp_to_net:'bytes from radio',"
 "net_to_ncp:'bytes to radio',ring_used:'in buffer',ring_full:'buffer overflows',connects:'connections',"
 "disconnects:'disconnects',dropped_no_client:'dropped, no client',ncp_resets:'radio resets',"
+"uart_tx_fail:'failed writes to radio',"
 "temp:'chip temperature, °C',heap:'free heap',min_heap:'minimum heap',version:'version',"
 "image:'image',crashes:'crashes in a row',"
 "hostname:'Hostname',eth_dhcp:'Ethernet: DHCP',eth_ip:'IP',eth_mask:'Netmask',eth_gw:'Gateway',"
@@ -148,15 +150,16 @@ static esp_err_t h_status(httpd_req_t *r)
         "{\"uptime\":%llu,\"ip\":\"%s\",\"link\":\"%s\",\"clients\":%d,"
         "\"ncp_to_net\":%llu,\"net_to_ncp\":%llu,\"ring_used\":%u,\"ring_full\":%u,"
         "\"connects\":%u,\"disconnects\":%u,\"dropped_no_client\":%llu,\"ncp_resets\":%u,"
+        "\"uart_tx_fail\":%u,"
         "\"temp\":%.1f,\"heap\":%u,\"min_heap\":%u,\"version\":\"%s %s\","
         "\"image\":\"%s\",\"crashes\":%u}",
         (unsigned long long)(esp_timer_get_time() / 1000000), net_ip(),
         net_eth_link() ? "витая пара" : net_wifi_link() ? "Wi-Fi" : net_ap_up() ? "точка доступа" : "нет",
-        s.connects > s.disconnects ? 1 : 0,
+        (int)s.client,
         (unsigned long long)s.ncp_to_net, (unsigned long long)s.net_to_ncp,
         (unsigned)s.ring_used, (unsigned)s.ring_full, (unsigned)s.connects,
         (unsigned)s.disconnects, (unsigned long long)s.dropped_no_client,
-        (unsigned)s.ncp_resets, bridge_chip_temp(),
+        (unsigned)s.ncp_resets, (unsigned)s.uart_tx_fail, bridge_chip_temp(),
         (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
         d->version, d->date,
         safety_on_trial() ? "на испытательном сроке" : "признан рабочим",

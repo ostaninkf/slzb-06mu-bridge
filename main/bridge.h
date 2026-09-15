@@ -11,7 +11,12 @@ typedef struct {
     uint32_t disconnects;
     uint32_t ring_full;
     uint32_t ncp_resets;
+    uint32_t uart_tx_fail;
     size_t   ring_used;
+    /* Отдельное поле, а не пара connects/disconnects: пару читают пять задач,
+     * и между двумя её половинами успевает пройти close_client() — признак
+     * «клиент есть» на миг врал. */
+    uint8_t  client;
 } bridge_stats_t;
 
 void bridge_start(void);

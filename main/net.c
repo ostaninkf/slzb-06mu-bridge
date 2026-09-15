@@ -28,6 +28,7 @@ static bool eth_link, wifi_link, ap_up;
 static char ip_str[32] = "нет адреса";
 
 bool net_eth_link(void)   { return eth_link; }
+bool net_has_addr(void)   { return ip_str[0] >= '0' && ip_str[0] <= '9'; }
 bool net_wifi_link(void)  { return wifi_link; }
 bool net_ap_up(void)      { return ap_up; }
 const char *net_ip(void)  { return ip_str; }
@@ -137,10 +138,11 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 /* --- W5500 --- */
 static esp_err_t eth_try_init(void)
 {
-    esp_err_t err;
+    esp_err_t err = ESP_FAIL;
     esp_eth_mac_t *mac = NULL;
     esp_eth_phy_t *phy = NULL;
     esp_eth_handle_t eth = NULL;
+    esp_eth_netif_glue_handle_t glue = NULL;
 
     spi_device_interface_config_t dev = {
         .mode = 0, .clock_speed_hz = W5500_SPI_HZ,
@@ -157,7 +159,7 @@ static esp_err_t eth_try_init(void)
 
     mac = esp_eth_mac_new_w5500(&w5500, &mac_cfg);
     phy = esp_eth_phy_new_w5500(&phy_cfg);
-    if (!mac || !phy) { err = ESP_FAIL; goto fail; }
+    if (!mac || !phy) goto fail;
 
     /* Без установленного сервиса прерываний gpio_isr_handler_add() внутри
      * драйвера W5500 возвращает ESP_ERR_INVALID_STATE, а IDF этот возврат не
@@ -181,25 +183,33 @@ static esp_err_t eth_try_init(void)
     ESP_LOGI(TAG, "MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac_addr[0], mac_addr[1],
              mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
     err = esp_eth_ioctl(eth, ETH_CMD_S_MAC_ADDR, mac_addr);
-    if (err != ESP_OK) goto fail_installed;
+    if (err != ESP_OK) goto fail;
 
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     eth_netif = esp_netif_new(&netif_cfg);
+    if (!eth_netif) { err = ESP_ERR_NO_MEM; goto fail; }
     esp_netif_set_hostname(eth_netif, cfg.hostname);
-    err = esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth));
-    if (err != ESP_OK) goto fail_installed;
+    glue = esp_eth_new_netif_glue(eth);
+    if (!glue) { err = ESP_ERR_NO_MEM; goto fail; }
+    err = esp_netif_attach(eth_netif, glue);
+    if (err != ESP_OK) goto fail;
+    glue = NULL;                    /* дальше связка принадлежит netif */
     apply_static_ip(eth_netif);
 
     err = esp_eth_start(eth);
-    if (err != ESP_OK) goto fail_installed;
+    if (err != ESP_OK) goto fail;
     return ESP_OK;
 
-fail_installed:
-    esp_eth_driver_uninstall(eth);
-    return err;
+/* Разбирать за собой обязательно: каждая попытка заводит устройство на шине
+ * SPI, netif и связку между ними, а попыток здесь десять подряд. Прежний код
+ * на пути «драйвер уже установлен» не освобождал ни mac, ни phy, ни netif —
+ * до перезагрузки доживала горсть повисших комплектов. */
 fail:
-    if (mac) mac->del(mac);
-    if (phy) phy->del(phy);
+    if (glue)      esp_eth_del_netif_glue(glue);
+    if (eth_netif) { esp_netif_destroy(eth_netif); eth_netif = NULL; }
+    if (eth)       esp_eth_driver_uninstall(eth);
+    if (mac)       mac->del(mac);
+    if (phy)       phy->del(phy);
     ESP_LOGE(TAG, "инициализация W5500 не удалась: %s", esp_err_to_name(err));
     return err;
 }

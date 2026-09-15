@@ -40,7 +40,7 @@ static void leds_task(void *arg)
         bool dark = !cfg.leds_enabled || night_now();
         bridge_stats_t s;
         bridge_get_stats(&s);
-        bool client = s.connects > s.disconnects;
+        bool client = s.client;
 
         if (dark) { set(PIN_LED1, false); set(PIN_LED2, false); set(PIN_RJ45_LEDS, false); }
         else {
