@@ -7,14 +7,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_mac.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_eth.h"
 #include "esp_eth_mac_spi.h"
 #include "esp_wifi.h"
 #include "esp_sntp.h"
 #include "mdns.h"
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "board.h"
@@ -214,6 +218,41 @@ fail:
     return err;
 }
 
+/* Периодический gratuitous ARP.
+ *
+ * Мост стоит за проводным портом спутника mesh (Orbi RBS850), и весь его трафик
+ * идёт через Wi-Fi-backhaul. Раз в ~31 минуту backhaul даёт секундный сбой,
+ * который сбрасывает в меше L2-запись «MAC моста живёт за спутником». Пока мост
+ * молчит вверх (между телеметрией он замолкает на 15-30 с), меш не знает, куда
+ * слать downlink, и пакеты К мосту теряются — uplink при этом идёт. Замер
+ * 15.09.2026: камера на том же спутнике теряла 1 пакет, спутник 1 секунду,
+ * а мост — сплошные 15 секунд, ровно на молчании. Именно это рвало сокет Z2M.
+ *
+ * Широковещательный gratuitous ARP раз в секунду заставляет каждый узел меша
+ * держать MAC моста «свежим»: downlink после любого сброса восстанавливается
+ * за время интервала, а не за 15 с. Камера не страдает по той же причине —
+ * она непрерывно шлёт видео вверх и её путь переучивается сам. */
+#define GARP_INTERVAL_MS 1000
+
+static esp_err_t garp_do(void *ctx)
+{
+    struct netif *nif = (struct netif *)esp_netif_get_netif_impl((esp_netif_t *)ctx);
+    if (nif && netif_is_up(nif) && netif_is_link_up(nif)) etharp_gratuitous(nif);
+    return ESP_OK;
+}
+
+static void garp_task(void *arg)
+{
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+    ESP_LOGI(TAG, "gratuitous ARP каждые %d мс — держим downlink через mesh живым",
+             GARP_INTERVAL_MS);
+    for (;;) {
+        esp_task_wdt_reset();
+        if (eth_link && eth_netif) esp_netif_tcpip_exec(garp_do, eth_netif);
+        vTaskDelay(pdMS_TO_TICKS(GARP_INTERVAL_MS));
+    }
+}
+
 /* Если ни витой пары, ни Wi-Fi нет — через минуту поднимаем точку доступа,
  * чтобы мост можно было настроить, не разбирая корпус. */
 static void fallback_task(void *arg)
@@ -271,4 +310,5 @@ void net_start(void)
     }
 
     xTaskCreate(fallback_task, "netfb", 3072, NULL, 3, NULL);
+    xTaskCreate(garp_task, "garp", 3072, NULL, 4, NULL);
 }
