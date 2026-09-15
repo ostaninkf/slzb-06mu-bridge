@@ -142,7 +142,12 @@ static void accept_new(void)
     int on = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
-    int idle = 10, intvl = 3, cnt = 3;
+    /* Держать клиента, а не сторожить его: обмен с NCP штатно замирает на
+     * 25-35 с, так что при idle=10 мост опрашивает соединение почти непрерывно,
+     * и трёх подряд потерянных проб (бюджет всего 9 с) хватает, чтобы lwIP
+     * оборвал живую сессию через RST. Z2M видит ECONNRESET и выходит с кодом 2.
+     * Подвисшего клиента вытесняет accept_new(), keepalive для этого не нужен. */
+    int idle = 30, intvl = 10, cnt = 5;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
@@ -240,7 +245,19 @@ static void bridge_task(void *arg)
         if (rc > 0) {
             if (p[0].revents & POLLIN) accept_new();
             if (np == 2 && client_fd >= 0) {
-                if (p[1].revents & (POLLERR | POLLHUP)) close_client("POLLERR/POLLHUP");
+                if (p[1].revents & (POLLERR | POLLHUP)) {
+                    /* Точную причину знает только сокет: POLLERR сам по себе
+                     * не отличает разрыв по keepalive от сброса удалённой
+                     * стороной, а без этого непонятно, чьё поведение чинить. */
+                    int err = 0;
+                    socklen_t el = sizeof(err);
+                    getsockopt(client_fd, SOL_SOCKET, SO_ERROR, &err, &el);
+                    char why[96];
+                    snprintf(why, sizeof(why), "%s, SO_ERROR=%d (%s)",
+                             (p[1].revents & POLLHUP) ? "POLLHUP" : "POLLERR",
+                             err, err ? strerror(err) : "без ошибки");
+                    close_client(why);
+                }
                 else {
                     if (p[1].revents & POLLIN)  pump_net_to_uart();
                     if (client_fd >= 0)         flush_ring_to_net();

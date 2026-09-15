@@ -167,6 +167,19 @@ static esp_err_t h_status(httpd_req_t *r)
 
 static void reboot_task(void *a) { vTaskDelay(pdMS_TO_TICKS(800)); esp_restart(); }
 
+/* httpd_req_recv отдаёт HTTPD_SOCK_ERR_TIMEOUT, если за recv_wait_timeout не
+ * пришло ни байта. Это не обрыв, а обычная пауза: обработчики же считали любой
+ * возврат <= 0 фатальным, и заливка прошивки по OTA обрывалась на середине
+ * («обрыв приёма», 15.09.2026, 09:07). Ждём молчания суммарно до минуты. */
+static int recv_chunk(httpd_req_t *r, char *buf, int len)
+{
+    for (int tries = 0; tries < 12; tries++) {
+        int n = httpd_req_recv(r, buf, len);
+        if (n != HTTPD_SOCK_ERR_TIMEOUT) return n;
+    }
+    return HTTPD_SOCK_ERR_TIMEOUT;
+}
+
 static esp_err_t h_settings_get(httpd_req_t *r)
 {
     char buf[1400];
@@ -181,7 +194,7 @@ static esp_err_t h_settings_post(httpd_req_t *r)
     char body[3001];
     int got = 0;
     while (got < r->content_len) {
-        int n = httpd_req_recv(r, body + got, r->content_len - got);
+        int n = recv_chunk(r, body + got, r->content_len - got);
         if (n <= 0) return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "обрыв приёма");
         got += n;
     }
@@ -218,7 +231,7 @@ static esp_err_t h_update(httpd_req_t *r)
     char buf[2048];
     int left = r->content_len;
     while (left > 0) {
-        int n = httpd_req_recv(r, buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
+        int n = recv_chunk(r, buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
         if (n <= 0) { esp_ota_abort(h); return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "обрыв приёма"); }
         if (esp_ota_write(h, buf, n) != ESP_OK) { esp_ota_abort(h); return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "запись не удалась"); }
         left -= n;
@@ -241,7 +254,7 @@ static esp_err_t h_ncp_update(httpd_req_t *r)
     char buf[1024];
     int left = r->content_len;
     while (left > 0) {
-        int n = httpd_req_recv(r, buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
+        int n = recv_chunk(r, buf, left < (int)sizeof(buf) ? left : (int)sizeof(buf));
         if (n <= 0) { ncp_flash_abort(); return httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "обрыв приёма"); }
         if (ncp_flash_feed((const uint8_t *)buf, n) != ESP_OK)
             return httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR, "радио не приняло блок");

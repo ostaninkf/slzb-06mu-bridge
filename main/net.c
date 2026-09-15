@@ -16,6 +16,7 @@
 #include "esp_sntp.h"
 #include "mdns.h"
 #include "driver/spi_master.h"
+#include "driver/gpio.h"
 #include "board.h"
 #include "settings.h"
 #include "net.h"
@@ -157,6 +158,19 @@ static esp_err_t eth_try_init(void)
     mac = esp_eth_mac_new_w5500(&w5500, &mac_cfg);
     phy = esp_eth_phy_new_w5500(&phy_cfg);
     if (!mac || !phy) { err = ESP_FAIL; goto fail; }
+
+    /* Без установленного сервиса прерываний gpio_isr_handler_add() внутри
+     * драйвера W5500 возвращает ESP_ERR_INVALID_STATE, а IDF этот возврат не
+     * проверяет: прерывание INT не доходит никогда, и задача приёма опускается
+     * на страховочный опрос ulTaskNotifyTake(..., pdMS_TO_TICKS(1000)).
+     * Пакеты в этом режиме разбираются пачкой раз в секунду — измеренный ping
+     * 74…1101 мс пилой. Ставить до esp_eth_driver_install: он вызывает
+     * mac->init(), а тот уже цепляет обработчик. */
+    esp_err_t isr = gpio_install_isr_service(0);
+    if (isr != ESP_OK && isr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "сервис прерываний GPIO не встал: %s — приём пойдёт "
+                      "опросом раз в секунду", esp_err_to_name(isr));
+    }
 
     esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
     err = esp_eth_driver_install(&eth_cfg, &eth);
